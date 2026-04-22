@@ -1,8 +1,13 @@
 // @ts-nocheck
-import { useCallback, useEffect, useRef, useState } from 'react';
-
-import { Dimensions, StyleSheet, View, Text, Animated } from 'react-native';
-
+import React, { useCallback, useEffect, useMemo, useRef } from 'react';
+import {
+  Dimensions,
+  StyleSheet,
+  View,
+  Text,
+  Animated,
+  TextInput,
+} from 'react-native';
 import type {
   TextStyle,
   NativeSyntheticEvent,
@@ -10,13 +15,10 @@ import type {
 } from 'react-native';
 
 import { AnimatedLegendList } from '@legendapp/list/animated';
-
 import type { LegendListRef } from '@legendapp/list';
 
 import { RulerPickerItem } from './ruler-picker-item';
-
 import type { RulerPickerItemProps } from './ruler-picker-item';
-
 import { calculateCurrentValue } from '../utils/calculations';
 
 export type RulerPickerTextProps = Pick<
@@ -38,87 +40,109 @@ export type RulerPickerProps = {
    */
   height?: number;
   /**
-   * Minimum value of the ruler picker
-   *
-   * @default 0
+   * Minimum value of the ruler picker.
+   * For feet mode, provide the value in inches (e.g. 48 = 4 feet).
    */
   min: number;
   /**
-   * Maximum value of the ruler picker
-   *
-   * @default 240
+   * Maximum value of the ruler picker.
+   * For feet mode, provide the value in inches (e.g. 84 = 7 feet).
    */
   max: number;
   /**
-   * Step of the ruler picker
+   * Step size between ticks.
+   * For feet mode, this is in inches (e.g. step=1 means 1-inch increments).
    *
    * @default 1
    */
   step?: number;
   /**
-   * Initial value of the ruler picker
+   * Initial selected value.
+   * For feet mode, provide the value in inches.
    *
    * @default min
    */
   initialValue?: number;
   /**
-   * Number of digits after the decimal point
+   * Number of decimal digits shown in the value indicator and onValueChange callbacks.
    *
    * @default 1
    */
   fractionDigits?: number;
   /**
-   * Unit of the ruler picker
+   * Unit label shown next to the value (e.g. 'cm', 'kg', 'sec').
+   * Set to empty string to hide.
    *
    * @default 'cm'
    */
   unit?: string;
   /**
-   * Height of the indicator
+   * Height of the center indicator line
    *
    * @default 80
    */
   indicatorHeight?: number;
   /**
-   * Color of the center line
+   * Color of the center indicator line
    *
    * @default 'black'
    */
   indicatorColor?: string;
   /**
-   * Text style of the value
+   * Text style overrides for the value display
    */
   valueTextStyle?: RulerPickerTextProps;
   /**
-   * Text style of the unit
+   * Text style overrides for the unit label
    */
   unitTextStyle?: RulerPickerTextProps;
   /**
-   * A floating-point number that determines how quickly the scroll view
-   * decelerates after the user lifts their finger. You may also use string
-   * shortcuts `"normal"` and `"fast"` which match the underlying iOS settings
-   * for `UIScrollViewDecelerationRateNormal` and
-   * `UIScrollViewDecelerationRateFast` respectively.
-   *
-   *  - `'normal'`: 0.998 on iOS, 0.985 on Android (the default)
-   *  - `'fast'`: 0.99 on iOS, 0.9 on Android
+   * Deceleration rate of the scroll view after the user lifts their finger.
    *
    * @default 'normal'
    */
   decelerationRate?: 'fast' | 'normal' | number;
   /**
-   * Callback when the value changes
+   * Display mode for tick labels and the value indicator:
+   * - 'decimal': 4.1, 4.2, 4.3...
+   * - 'integer': 4, 5, 6...
+   * - 'tens': 10, 20, 30...
+   * - 'feet': 5' 0", 5' 1"... (min/max/step must be in inches)
    *
-   * @param value
+   * @default 'decimal'
+   */
+  displayMode?: 'decimal' | 'integer' | 'tens' | 'feet';
+  /**
+   * Decimal places used only for long-step tick labels.
+   * Overrides fractionDigits for label display only.
+   *
+   * @default fractionDigits
+   */
+  longStepFractionDigits?: number;
+  /**
+   * Called continuously as the user scrolls (throttled to 16 ms).
+   * Receives the current raw value as a string (inches for feet mode).
    */
   onValueChange?: (value: string) => void;
   /**
-   * Callback when the value changes end
-   *
-   * @param value
+   * Called once when the user finishes scrolling and the picker settles.
+   * Receives the final raw value as a string.
    */
   onValueChangeEnd?: (value: string) => void;
 } & Partial<RulerPickerItemProps>;
+
+/**
+ * Convert a raw inch value string to a "X' Y"" display string.
+ */
+const formatFeetDisplay = (rawValue: string): string => {
+  const totalInches = parseFloat(rawValue);
+  if (isNaN(totalInches)) return rawValue;
+  const feet = Math.floor(totalInches / 12);
+  const inches = Math.round((totalInches % 12) * 10) / 10;
+  const inchStr =
+    inches % 1 === 0 ? `${Math.round(inches)}` : inches.toFixed(1);
+  return `${feet}' ${inchStr}"`;
+};
 
 export const RulerPicker = ({
   width = windowWidth,
@@ -142,67 +166,104 @@ export const RulerPicker = ({
   decelerationRate = 'normal',
   onValueChange,
   onValueChangeEnd,
+  displayMode = 'decimal',
+  longStepFractionDigits,
 }: RulerPickerProps) => {
+  // Extra items rendered before min and after max so the user can scroll
+  // slightly beyond the range; the picker auto-snaps back on release.
+  const extraItems = 20;
   const itemAmount = (max - min) / step;
-  const arrData: number[] = Array.from(
-    { length: itemAmount + 1 },
-    (_, index) => index
-  );
+  const availableItemsCount = itemAmount + 1;
+  const firstAvailableIndex = extraItems;
+  const lastAvailableIndex = extraItems + availableItemsCount - 1;
+  const totalItems = availableItemsCount + extraItems * 2;
+  // Virtual min used in offset→value math to account for the extra prefix items
+  const minForCalculation = min - firstAvailableIndex * step;
+
+  const arrData = Array.from({ length: totalItems }, (_, index) => index);
 
   const listRef = useRef<LegendListRef>(null);
+  const isInitialScrollDone = useRef(false);
+  const initialScrollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const [displayValue, setDisplayValue] = useState(
-    initialValue.toFixed(fractionDigits)
+  // In feet mode, the raw value is in inches — fractionDigits=1 is sufficient
+  const fractionDigitsWithDisplayMode = useMemo(() => {
+    if (displayMode === 'feet') return 1;
+    return fractionDigits;
+  }, [displayMode, fractionDigits]);
+
+  // Use a TextInput ref so we can update the displayed value with setNativeProps
+  // (no React re-render, smoother scrolling).
+  const stepTextRef = useRef<TextInput>(null);
+  const prevValue = useRef<string>(
+    initialValue.toFixed(fractionDigitsWithDisplayMode)
   );
-  const prevValue = useRef<string>(initialValue.toFixed(fractionDigits));
   const prevMomentumValue = useRef<string>(
-    initialValue.toFixed(fractionDigits)
+    initialValue.toFixed(fractionDigitsWithDisplayMode)
   );
   const scrollPosition = useRef(new Animated.Value(0)).current;
 
-  const valueCallback = useCallback(
-    ({ value }: { value: number }) => {
+  const formatDisplay = useCallback(
+    (rawValue: string): string => {
+      if (displayMode === 'feet') return formatFeetDisplay(rawValue);
+      return rawValue;
+    },
+    [displayMode]
+  );
+
+  const valueCallback: Animated.ValueListenerCallback = useCallback(
+    ({ value }) => {
       const newStep = calculateCurrentValue(
         value,
         stepWidth,
         gapBetweenSteps,
-        min,
+        minForCalculation,
         max,
         step,
-        fractionDigits
+        fractionDigitsWithDisplayMode
       );
 
       if (prevValue.current !== newStep) {
-        onValueChange?.(newStep);
-        setDisplayValue(newStep);
+        if (isInitialScrollDone.current) {
+          onValueChange?.(newStep);
+          stepTextRef.current?.setNativeProps({
+            text: formatDisplay(newStep),
+          });
+        }
       }
 
       prevValue.current = newStep;
     },
-    [fractionDigits, gapBetweenSteps, stepWidth, max, min, onValueChange, step]
+    [
+      fractionDigitsWithDisplayMode,
+      gapBetweenSteps,
+      stepWidth,
+      max,
+      minForCalculation,
+      onValueChange,
+      step,
+      formatDisplay,
+    ]
   );
 
   useEffect(() => {
-    const listenerId = scrollPosition.addListener(valueCallback);
-
+    scrollPosition.addListener(valueCallback);
     return () => {
-      scrollPosition.removeListener(listenerId);
+      scrollPosition.removeAllListeners();
     };
   }, [scrollPosition, valueCallback]);
 
+  useEffect(() => {
+    return () => {
+      if (initialScrollTimer.current) {
+        clearTimeout(initialScrollTimer.current);
+      }
+    };
+  }, []);
+
   const scrollHandler = Animated.event(
-    [
-      {
-        nativeEvent: {
-          contentOffset: {
-            x: scrollPosition,
-          },
-        },
-      },
-    ],
-    {
-      useNativeDriver: true,
-    }
+    [{ nativeEvent: { contentOffset: { x: scrollPosition } } }],
+    { useNativeDriver: true }
   );
 
   const renderSeparator = useCallback(
@@ -215,6 +276,11 @@ export const RulerPicker = ({
       return (
         <RulerPickerItem
           isLast={index === arrData.length - 1}
+          isInactive={
+            index < firstAvailableIndex || index > lastAvailableIndex
+          }
+          firstAvailableIndex={firstAvailableIndex}
+          lastAvailableIndex={lastAvailableIndex}
           index={index}
           shortStepHeight={shortStepHeight}
           longStepHeight={longStepHeight}
@@ -222,200 +288,286 @@ export const RulerPicker = ({
           stepWidth={stepWidth}
           shortStepColor={shortStepColor}
           longStepColor={longStepColor}
+          min={min}
+          step={step}
+          displayMode={displayMode}
+          totalItems={arrData.length}
+          fractionDigits={fractionDigitsWithDisplayMode}
+          longStepFractionDigits={longStepFractionDigits}
         />
       );
     },
     [
       arrData.length,
+      firstAvailableIndex,
+      lastAvailableIndex,
       gapBetweenSteps,
       stepWidth,
       longStepColor,
       longStepHeight,
       shortStepColor,
       shortStepHeight,
-    ]
-  );
-
-  const scrollEndTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const isScrolling = useRef(false);
-
-  const handleScrollEnd = useCallback(
-    (offset: number) => {
-      // Calculate the snapped offset
-      const stepSize = stepWidth + gapBetweenSteps;
-      const snappedIndex = Math.round(offset / stepSize);
-      const snappedOffset = snappedIndex * stepSize;
-
-      // Calculate value from snapped position
-      const newStep = calculateCurrentValue(
-        snappedOffset,
-        stepWidth,
-        gapBetweenSteps,
-        min,
-        max,
-        step,
-        fractionDigits
-      );
-
-      if (prevMomentumValue.current !== newStep) {
-        onValueChangeEnd?.(newStep);
-      }
-
-      prevMomentumValue.current = newStep;
-      isScrolling.current = false;
-    },
-    [
-      fractionDigits,
-      gapBetweenSteps,
-      stepWidth,
-      max,
       min,
-      onValueChangeEnd,
       step,
+      displayMode,
+      fractionDigitsWithDisplayMode,
+      longStepFractionDigits,
     ]
   );
 
-  const scheduleScrollEnd = useCallback(
-    (offset: number) => {
-      // Clear any pending timeout
-      if (scrollEndTimeout.current) {
-        clearTimeout(scrollEndTimeout.current);
-      }
+  /**
+   * When the scroll view settles outside the valid [min, max] range, animate
+   * back to the nearest boundary.  Uses a two-phase approach for large
+   * distances: instant jump close to the target, then a smooth animation for
+   * the last few steps.
+   */
+  const scrollBackToRange = useCallback(
+    (rawIndex: number) => {
+      const targetIndex =
+        rawIndex < firstAvailableIndex
+          ? firstAvailableIndex
+          : lastAvailableIndex;
+      const stepSize = stepWidth + gapBetweenSteps;
+      const targetOffset = targetIndex * stepSize;
+      const distance = Math.abs(targetOffset - rawIndex * stepSize);
 
-      // Delay to allow snap animation to complete
-      scrollEndTimeout.current = setTimeout(() => {
-        handleScrollEnd(offset);
-      }, 150);
+      if (distance > 5 * stepSize) {
+        // Jump instantly to 3 steps away, then animate the final segment
+        const nearTargetOffset =
+          rawIndex < firstAvailableIndex
+            ? targetOffset - 3 * stepSize
+            : targetOffset + 3 * stepSize;
+        listRef.current?.scrollToOffset({
+          offset: nearTargetOffset,
+          animated: false,
+        });
+        setTimeout(() => {
+          listRef.current?.scrollToOffset({
+            offset: targetOffset,
+            animated: true,
+          });
+        }, 16);
+      } else {
+        listRef.current?.scrollToOffset({ offset: targetOffset, animated: true });
+      }
     },
-    [handleScrollEnd]
+    [firstAvailableIndex, lastAvailableIndex, stepWidth, gapBetweenSteps]
   );
 
   const onMomentumScrollEnd = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
-      const offset = event.nativeEvent.contentOffset.x;
-      scheduleScrollEnd(offset);
+      const position =
+        event.nativeEvent.contentOffset.x ||
+        event.nativeEvent.contentOffset.y ||
+        0;
+      const rawIndex = Math.round(position / (stepWidth + gapBetweenSteps));
+      const newStep = calculateCurrentValue(
+        position,
+        stepWidth,
+        gapBetweenSteps,
+        minForCalculation,
+        max,
+        step,
+        fractionDigitsWithDisplayMode
+      );
+
+      if (rawIndex < firstAvailableIndex || rawIndex > lastAvailableIndex) {
+        scrollBackToRange(rawIndex);
+      }
+
+      if (prevMomentumValue.current !== newStep) {
+        onValueChangeEnd?.(newStep);
+      }
+      prevMomentumValue.current = newStep;
     },
-    [scheduleScrollEnd]
+    [
+      fractionDigitsWithDisplayMode,
+      gapBetweenSteps,
+      stepWidth,
+      max,
+      minForCalculation,
+      onValueChangeEnd,
+      step,
+      firstAvailableIndex,
+      lastAvailableIndex,
+      scrollBackToRange,
+    ]
   );
 
+  /**
+   * Handles the case where the user drags slowly (no momentum phase).
+   * If the drag ends outside the valid range, snap back immediately.
+   */
   const onScrollEndDrag = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
-      const offset = event.nativeEvent.contentOffset.x;
-      isScrolling.current = true;
+      const position = event.nativeEvent.contentOffset.x || 0;
+      const rawIndex = Math.round(position / (stepWidth + gapBetweenSteps));
 
-      // Schedule scroll end - will be cancelled if momentum scroll starts
-      scheduleScrollEnd(offset);
+      if (rawIndex < firstAvailableIndex || rawIndex > lastAvailableIndex) {
+        scrollBackToRange(rawIndex);
+      }
     },
-    [scheduleScrollEnd]
+    [firstAvailableIndex, lastAvailableIndex, stepWidth, gapBetweenSteps, scrollBackToRange]
   );
 
-  const onScrollBeginDrag = useCallback(() => {
-    // Clear any pending end callback when new scroll starts
-    if (scrollEndTimeout.current) {
-      clearTimeout(scrollEndTimeout.current);
-    }
-    isScrolling.current = true;
-  }, []);
-
-  const onMomentumScrollBegin = useCallback(() => {
-    // Clear the drag end timeout since momentum is taking over
-    if (scrollEndTimeout.current) {
-      clearTimeout(scrollEndTimeout.current);
-    }
-  }, []);
-
-  // Clean up timeout on unmount
-  useEffect(() => {
-    return () => {
-      if (scrollEndTimeout.current) {
-        clearTimeout(scrollEndTimeout.current);
-      }
-    };
-  }, []);
-
   const onContentSizeChange = useCallback(() => {
-    const initialIndex = Math.floor((initialValue - min) / step);
+    if (isInitialScrollDone.current) return;
+
+    const initialIndex =
+      firstAvailableIndex + Math.round((initialValue - min) / step);
     listRef.current?.scrollToOffset({
       offset: initialIndex * (stepWidth + gapBetweenSteps),
       animated: false,
     });
-  }, [initialValue, min, step, stepWidth, gapBetweenSteps]);
+
+    if (initialScrollTimer.current) {
+      clearTimeout(initialScrollTimer.current);
+    }
+    initialScrollTimer.current = setTimeout(() => {
+      isInitialScrollDone.current = true;
+      prevValue.current = initialValue.toFixed(fractionDigitsWithDisplayMode);
+    }, 300);
+  }, [
+    firstAvailableIndex,
+    initialValue,
+    min,
+    step,
+    stepWidth,
+    gapBetweenSteps,
+    fractionDigitsWithDisplayMode,
+  ]);
+
+  const initialDisplayValue = formatDisplay(
+    initialValue.toFixed(fractionDigitsWithDisplayMode)
+  );
 
   return (
-    <View
-      style={{ width, height, justifyContent: 'center', alignItems: 'center' }}
-    >
-      {/* Value and Unit Text - positioned above */}
-      <View style={styles.textContainer}>
-        <Text style={[styles.valueText, valueTextStyle]}>{displayValue}</Text>
-        {unit && <Text style={[styles.unitText, unitTextStyle]}>{unit}</Text>}
-      </View>
+    <View style={{ width, height }}>
+      <AnimatedLegendList
+        ref={listRef}
+        data={arrData}
+        keyExtractor={(_: number, index: number) => index.toString()}
+        renderItem={renderItem}
+        ListHeaderComponent={renderSeparator}
+        ListFooterComponent={renderSeparator}
+        onScroll={scrollHandler}
+        onMomentumScrollEnd={onMomentumScrollEnd}
+        onScrollEndDrag={onScrollEndDrag}
+        estimatedItemSize={stepWidth + gapBetweenSteps}
+        getFixedItemSize={() => stepWidth + gapBetweenSteps}
+        recycleItems
+        drawDistance={500}
+        snapToOffsets={arrData.map(
+          (_, index) => index * (stepWidth + gapBetweenSteps)
+        )}
+        onContentSizeChange={onContentSizeChange}
+        snapToAlignment="start"
+        decelerationRate={decelerationRate}
+        scrollEventThrottle={16}
+        showsHorizontalScrollIndicator={false}
+        showsVerticalScrollIndicator={false}
+        horizontal
+        bounces
+      />
 
-      {/* Ruler List with Indicator */}
-      <View style={{ width }}>
-        {/* Indicator line - extends up from ruler, overlapping with it */}
+      {/* Indicator overlay — center line + value text */}
+      <View
+        pointerEvents="none"
+        style={[
+          styles.indicator,
+          {
+            transform: [
+              { translateX: -stepWidth * 0.5 },
+              {
+                translateY:
+                  -indicatorHeight * 0.5 -
+                  (valueTextStyle?.fontSize ?? styles.valueText.fontSize),
+              },
+            ],
+            left: stepWidth * 0.5,
+          },
+        ]}
+      >
         <View
-          pointerEvents="none"
+          style={[
+            styles.displayTextContainer,
+            {
+              height: valueTextStyle?.fontSize ?? styles.valueText.fontSize,
+              transform: [
+                {
+                  translateY:
+                    -(valueTextStyle?.fontSize ?? styles.valueText.fontSize) *
+                    0.5,
+                },
+              ],
+            },
+          ]}
+        >
+          <TextInput
+            ref={stepTextRef}
+            defaultValue={initialDisplayValue}
+            editable={false}
+            style={[
+              {
+                lineHeight:
+                  valueTextStyle?.fontSize ?? styles.valueText.fontSize,
+              },
+              styles.valueText,
+              valueTextStyle,
+            ]}
+          />
+          {unit ? (
+            <Text
+              style={[
+                {
+                  lineHeight:
+                    unitTextStyle?.fontSize ?? styles.unitText.fontSize,
+                },
+                styles.unitText,
+                unitTextStyle,
+              ]}
+            >
+              {unit}
+            </Text>
+          ) : null}
+        </View>
+
+        <View
           style={{
-            alignSelf: 'center',
             width: stepWidth,
             height: indicatorHeight,
             backgroundColor: indicatorColor,
-            marginBottom: -longStepHeight,
-            zIndex: 10,
           }}
         />
-
-        {/* Ruler List */}
-
-        <View style={{ width, height: longStepHeight }}>
-          <AnimatedLegendList
-            ref={listRef}
-            data={arrData}
-            keyExtractor={(_: number, index: number) => index.toString()}
-            renderItem={renderItem}
-            ListHeaderComponent={renderSeparator}
-            ListFooterComponent={renderSeparator}
-            onScroll={scrollHandler}
-            onScrollBeginDrag={onScrollBeginDrag}
-            onScrollEndDrag={onScrollEndDrag}
-            onMomentumScrollBegin={onMomentumScrollBegin}
-            onMomentumScrollEnd={onMomentumScrollEnd}
-            estimatedItemSize={stepWidth + gapBetweenSteps}
-            getFixedItemSize={() => stepWidth + gapBetweenSteps}
-            recycleItems
-            drawDistance={500}
-            snapToOffsets={arrData.map(
-              (_, index) => index * (stepWidth + gapBetweenSteps)
-            )}
-            onContentSizeChange={onContentSizeChange}
-            snapToAlignment="start"
-            decelerationRate={decelerationRate}
-            scrollEventThrottle={16}
-            showsHorizontalScrollIndicator={false}
-            showsVerticalScrollIndicator={false}
-            horizontal
-          />
-        </View>
       </View>
     </View>
   );
 };
 
 const styles = StyleSheet.create({
-  textContainer: {
+  indicator: {
+    position: 'absolute',
+    top: '50%',
+    width: '100%',
+    alignItems: 'center',
+  },
+  displayTextContainer: {
+    width: '100%',
     flexDirection: 'row',
-    alignItems: 'baseline',
+    alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: 16,
   },
   valueText: {
     color: 'black',
     fontSize: 32,
+    fontWeight: '800',
+    margin: 0,
+    padding: 0,
   },
   unitText: {
     color: 'black',
     fontSize: 24,
+    fontWeight: '400',
     marginLeft: 6,
   },
 });
