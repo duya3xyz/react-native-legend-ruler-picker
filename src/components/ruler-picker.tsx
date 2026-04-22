@@ -185,6 +185,7 @@ export const RulerPicker = ({
   const listRef = useRef<LegendListRef>(null);
   const isInitialScrollDone = useRef(false);
   const initialScrollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isScrollingBack = useRef(false);
 
   // In feet mode, the raw value is in inches — fractionDigits=1 is sufficient
   const fractionDigitsWithDisplayMode = useMemo(() => {
@@ -323,39 +324,28 @@ export const RulerPicker = ({
    */
   const scrollBackToRange = useCallback(
     (rawIndex: number) => {
+      if (isScrollingBack.current) return;
+      isScrollingBack.current = true;
+
       const targetIndex =
         rawIndex < firstAvailableIndex
           ? firstAvailableIndex
           : lastAvailableIndex;
       const stepSize = stepWidth + gapBetweenSteps;
       const targetOffset = targetIndex * stepSize;
-      const distance = Math.abs(targetOffset - rawIndex * stepSize);
 
-      if (distance > 5 * stepSize) {
-        // Jump instantly to 3 steps away, then animate the final segment
-        const nearTargetOffset =
-          rawIndex < firstAvailableIndex
-            ? targetOffset - 3 * stepSize
-            : targetOffset + 3 * stepSize;
-        listRef.current?.scrollToOffset({
-          offset: nearTargetOffset,
-          animated: false,
-        });
-        setTimeout(() => {
-          listRef.current?.scrollToOffset({
-            offset: targetOffset,
-            animated: true,
-          });
-        }, 16);
-      } else {
-        listRef.current?.scrollToOffset({ offset: targetOffset, animated: true });
-      }
+      listRef.current?.scrollToOffset({ offset: targetOffset, animated: true });
+
+      setTimeout(() => {
+        isScrollingBack.current = false;
+      }, 600);
     },
     [firstAvailableIndex, lastAvailableIndex, stepWidth, gapBetweenSteps]
   );
 
   const onMomentumScrollEnd = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+      if (isScrollingBack.current) return;
       const position =
         event.nativeEvent.contentOffset.x ||
         event.nativeEvent.contentOffset.y ||
