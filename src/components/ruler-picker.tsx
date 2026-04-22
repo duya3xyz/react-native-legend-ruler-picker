@@ -480,7 +480,7 @@ export const RulerPicker = ({
               { translateX: -stepWidth * 0.5 },
               {
                 translateY:
-                  -indicatorHeight * 0.5 -
+                  -indicatorHeight * 0.55 -
                   (valueTextStyle?.fontSize ?? styles.valueText.fontSize),
               },
             ],
