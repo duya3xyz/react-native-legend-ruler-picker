@@ -147,7 +147,8 @@ export const RulerPickerItem = React.memo(
           ? isFootBoundary || isFirstAvailable || isLastAvailable
           : relativeIndex % 10 === 0 || isFirstAvailable || isLastAvailable;
 
-    const height = isLong ? longStepHeight : shortStepHeight;
+    const height = isLong ? longStepHeight * 0.75 : shortStepHeight;
+
 
     // Compute the label value for long steps
     let value: string;
@@ -180,7 +181,7 @@ export const RulerPickerItem = React.memo(
           height: '100%',
           justifyContent: 'center',
           marginRight: isLast ? 0 : gapBetweenSteps,
-          marginTop: shortStepHeight,
+          marginTop: shortStepHeight + 5,
           // Inactive items (outside min/max) are shown at 50% opacity
           opacity: isInactive ? 0.5 : 1,
         }}
@@ -193,7 +194,7 @@ export const RulerPickerItem = React.memo(
               width: textWidth,
               position: 'absolute',
               left: textLeft,
-              top: 0,
+              top: -15,
               textAlign: 'center',
             }}
           >
@@ -206,7 +207,7 @@ export const RulerPickerItem = React.memo(
             width: '100%',
             height: height,
             backgroundColor: isLong ? longStepColor : shortStepColor,
-            marginTop: isLong ? 0 : shortStepHeight,
+            marginTop: isLong ? -3 : shortStepHeight,
           }}
         />
       </View>
