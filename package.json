@@ -2,7 +2,6 @@
   "name": "react-native-legend-ruler-picker",
   "version": "1.0.2",
   "description": "Ruler Picker with Legend List",
-  "private": true,
   "main": "./src/index.tsx",
   "types": "./lib/typescript/src/index.d.ts",
   "exports": {
@@ -90,9 +89,6 @@
     "react": "*",
     "react-native": "*"
   },
-  "workspaces": [
-    "example"
-  ],
   "packageManager": "yarn@4.11.0",
   "react-native-builder-bob": {
     "source": "src",
